@@ -8,25 +8,79 @@
  * - Copy prompt
  * - REST API request to the WordPress backend
  *
- * Important:
- * This version sends data as application/x-www-form-urlencoded.
- * This helps avoid "Unsupported Media Type" issues on some WordPress setups.
+ * This version sends data as application/x-www-form-urlencoded and reads
+ * both JSON and plain/HTML error bodies, so real server/API errors appear
+ * instead of a generic "Something went wrong" message.
  */
 (function () {
   'use strict';
 
-  const data = window.EPAC_DATA || {};
+  let data = window.EPAC_DATA || {};
+  let hasFrontendConfig = !!window.EPAC_DATA;
   const i18n = data.i18n || {};
 
   const defaults = {
     copied: 'Prompt copied.',
     working: 'Generating paper...',
     error: 'Something went wrong. Please try again.',
+    configMissing: 'EduPaper AI Chat frontend config is missing. Clear cache and make sure wp_localize_script is loading before this JS file.',
+    endpointMissing: 'EduPaper AI Chat endpoint or nonce is missing. Clear cache, disable JS optimization temporarily, and reload the page.',
     emptyPrompt: 'Please select options or add instructions first.',
     assistantHi: 'Select the paper options above. Your prompt will appear below, then I can generate the paper here.',
   };
 
   const text = Object.assign({}, defaults, i18n);
+
+  function parseJsonAttribute(value, fallback) {
+    if (!value) {
+      return fallback;
+    }
+
+    try {
+      return JSON.parse(value);
+    } catch (error) {
+      return fallback;
+    }
+  }
+
+  function hydrateConfigFromRoot(root) {
+    if (!root) {
+      return;
+    }
+
+    const endpoint = root.getAttribute('data-epac-endpoint') || '';
+    const nonce = root.getAttribute('data-epac-nonce') || '';
+    const defaultProvider = root.getAttribute('data-epac-default-provider') || '';
+    const showProviderSwitch = root.getAttribute('data-epac-show-provider-switch');
+    const enabledProviders = parseJsonAttribute(
+      root.getAttribute('data-epac-enabled-providers'),
+      []
+    );
+
+    data = Object.assign(
+      {},
+      data,
+      {
+        endpoint: data.endpoint || endpoint,
+        nonce: data.nonce || nonce,
+        defaultProvider: data.defaultProvider || defaultProvider,
+        showProviderSwitch:
+          typeof data.showProviderSwitch === 'boolean'
+            ? data.showProviderSwitch
+            : showProviderSwitch === '1',
+        enabledProviders:
+          Array.isArray(data.enabledProviders) && data.enabledProviders.length
+            ? data.enabledProviders
+            : enabledProviders,
+      }
+    );
+
+    hasFrontendConfig = !!(data.endpoint && data.nonce);
+
+    if (!window.EPAC_DATA && hasFrontendConfig) {
+      window.EPAC_DATA = data;
+    }
+  }
 
   function qs(root, selector) {
     return root.querySelector(selector);
@@ -38,6 +92,12 @@
 
   function normalize(value) {
     return String(value || '').trim();
+  }
+
+  function stripHtml(value) {
+    const div = document.createElement('div');
+    div.innerHTML = String(value || '');
+    return normalize(div.textContent || div.innerText || '');
   }
 
   function isBlankChoice(value) {
@@ -544,19 +604,70 @@
   }
 
   function parseErrorMessage(errorPayload) {
-    if (!errorPayload || typeof errorPayload !== 'object') {
+    if (!errorPayload) {
       return text.error;
     }
 
+    if (typeof errorPayload === 'string') {
+      return normalize(errorPayload) || text.error;
+    }
+
     if (errorPayload.message) {
-      return String(errorPayload.message);
+      const code = errorPayload.code ? ' [' + String(errorPayload.code) + ']' : '';
+      const status = errorPayload.httpStatus ? ' HTTP ' + String(errorPayload.httpStatus) + ':' : '';
+      return normalize(status + code + ' ' + String(errorPayload.message));
     }
 
     if (errorPayload.data && errorPayload.data.message) {
       return String(errorPayload.data.message);
     }
 
+    if (errorPayload.error && errorPayload.error.message) {
+      return String(errorPayload.error.message);
+    }
+
     return text.error;
+  }
+
+  function parseFetchResponse(response) {
+    return response.text().then(function (rawText) {
+      let payload = null;
+      const cleanText = normalize(rawText);
+
+      if (cleanText) {
+        try {
+          payload = JSON.parse(cleanText);
+        } catch (error) {
+          payload = null;
+        }
+      }
+
+      if (!response.ok) {
+        if (payload) {
+          if (typeof payload === 'object' && payload && !payload.httpStatus) {
+            payload.httpStatus = response.status;
+          }
+          throw payload;
+        }
+
+        const snippet = stripHtml(cleanText).slice(0, 260);
+        throw {
+          message:
+            snippet ||
+            'Request failed with HTTP ' + response.status + ' ' + response.statusText,
+        };
+      }
+
+      if (payload) {
+        return payload;
+      }
+
+      throw {
+        message: cleanText
+          ? 'Server returned a non-JSON response: ' + stripHtml(cleanText).slice(0, 260)
+          : text.error,
+      };
+    });
   }
 
   function sendPrompt(root) {
@@ -568,8 +679,17 @@
       return;
     }
 
+    if (!hasFrontendConfig) {
+      const message = text.configMissing;
+      appendMessage(root, 'assistant', message);
+      setNotice(root, message, 'error');
+      return;
+    }
+
     if (!data.endpoint || !data.nonce) {
-      setNotice(root, text.error, 'error');
+      const message = text.endpointMissing + ' endpoint=' + (data.endpoint ? 'yes' : 'no') + ', nonce=' + (data.nonce ? 'yes' : 'no') + '.';
+      appendMessage(root, 'assistant', message);
+      setNotice(root, message, 'error');
       return;
     }
 
@@ -593,20 +713,7 @@
         },
         body: body.toString(),
       })
-      .then(function (response) {
-        return response
-          .json()
-          .catch(function () {
-            return {};
-          })
-          .then(function (payload) {
-            if (!response.ok) {
-              throw payload;
-            }
-
-            return payload;
-          });
-      })
+      .then(parseFetchResponse)
       .then(function (payload) {
         const answer = normalize(payload.answer);
         const responseProvider = normalize(payload.provider || provider);
@@ -714,6 +821,7 @@
     }
 
     root.dataset.epacInitialized = '1';
+    hydrateConfigFromRoot(root);
 
     initDropdowns(root);
     initProviderPicker(root);
