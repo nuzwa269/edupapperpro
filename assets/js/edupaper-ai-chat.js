@@ -9,8 +9,8 @@
  * - REST API request to the WordPress backend
  *
  * Important:
- * This file sends provider + prompt to the WordPress REST endpoint.
- * It uses application/x-www-form-urlencoded to avoid Unsupported Media Type errors.
+ * This version sends data as application/x-www-form-urlencoded.
+ * This helps avoid "Unsupported Media Type" issues on some WordPress setups.
  */
 (function () {
   'use strict';
@@ -47,7 +47,9 @@
       clean === '' ||
       clean === 'not specified' ||
       clean === '— select —' ||
-      clean === 'select'
+      clean === 'select' ||
+      clean === 'none' ||
+      clean === 'no'
     );
   }
 
@@ -327,7 +329,12 @@
 
     let prompt = '';
 
-    if (testType || grade || subject || board) {
+    if (
+      (testType && !isBlankChoice(testType)) ||
+      (grade && !isBlankChoice(grade)) ||
+      (subject && !isBlankChoice(subject)) ||
+      (board && !isBlankChoice(board))
+    ) {
       prompt += 'I need';
 
       if (testType && !isBlankChoice(testType)) {
@@ -336,7 +343,10 @@
         prompt += ' an exam paper';
       }
 
-      if (grade || subject) {
+      if (
+        (grade && !isBlankChoice(grade)) ||
+        (subject && !isBlankChoice(subject))
+      ) {
         prompt += ' for';
 
         if (grade && !isBlankChoice(grade)) {
@@ -578,6 +588,7 @@
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
           Accept: 'application/json',
+          'X-WP-Nonce': data.nonce,
           'X-EPAC-Nonce': data.nonce,
         },
         body: body.toString(),
