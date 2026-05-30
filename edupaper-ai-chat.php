@@ -3,7 +3,7 @@
  * Plugin Name: EduPaper AI Chat
  * Plugin URI: https://github.com/ummeawais19/edupaper-ai-chat
  * Description: A full-width, mobile-responsive exam paper prompt builder with provider support for OpenAI/ChatGPT, Google Gemini, xAI/Grok, and custom OpenAI-compatible APIs.
- * Version: 2.0.0
+ * Version: 2.0.4
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * Author: Nazhat Wasim
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'EPAC_VERSION', '2.0.0' );
+define( 'EPAC_VERSION', '2.0.4' );
 define( 'EPAC_PLUGIN_FILE', __FILE__ );
 define( 'EPAC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'EPAC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -402,18 +402,23 @@ function epac_render_settings_page() {
  * @return void
  */
 function epac_register_assets() {
+	$css_file = EPAC_PLUGIN_DIR . 'assets/css/edupaper-ai-chat.css';
+	$js_file  = EPAC_PLUGIN_DIR . 'assets/js/edupaper-ai-chat.js';
+	$css_ver  = file_exists( $css_file ) ? (string) filemtime( $css_file ) : EPAC_VERSION;
+	$js_ver   = file_exists( $js_file ) ? (string) filemtime( $js_file ) : EPAC_VERSION;
+
 	wp_register_style(
 		'epac-frontend',
 		EPAC_PLUGIN_URL . 'assets/css/edupaper-ai-chat.css',
 		array(),
-		EPAC_VERSION
+		$css_ver
 	);
 
 	wp_register_script(
 		'epac-frontend',
 		EPAC_PLUGIN_URL . 'assets/js/edupaper-ai-chat.js',
 		array(),
-		EPAC_VERSION,
+		$js_ver,
 		true
 	);
 }
@@ -443,33 +448,59 @@ function epac_get_enabled_providers_for_frontend() {
 }
 
 /**
+ * Build frontend config.
+ *
+ * This data is not secret. API keys are never printed on the frontend.
+ *
+ * @return array<string, mixed>
+ */
+function epac_get_frontend_config() {
+	$settings = epac_get_settings();
+
+	return array(
+		'endpoint'           => esc_url_raw( rest_url( EPAC_REST_NAMESPACE . '/generate' ) ),
+		'nonce'              => wp_create_nonce( 'wp_rest' ),
+		'defaultProvider'    => sanitize_key( $settings['default_provider'] ),
+		'showProviderSwitch' => '1' === (string) $settings['show_provider_switch'],
+		'enabledProviders'   => epac_get_enabled_providers_for_frontend(),
+		'i18n'               => array(
+			'copied'          => __( 'Prompt copied.', 'edupaper-ai-chat' ),
+			'working'         => __( 'Generating paper...', 'edupaper-ai-chat' ),
+			'error'           => __( 'Something went wrong. Please try again.', 'edupaper-ai-chat' ),
+			'configMissing'   => __( 'EduPaper AI Chat frontend config is missing. The page did not receive endpoint/nonce data.', 'edupaper-ai-chat' ),
+			'endpointMissing' => __( 'EduPaper AI Chat endpoint or nonce is missing. Clear cache and reload the page.', 'edupaper-ai-chat' ),
+			'emptyPrompt'     => __( 'Please select options or add instructions first.', 'edupaper-ai-chat' ),
+			'assistantHi'     => __( 'Select the paper options above. Your prompt will appear below, then I can generate the paper here.', 'edupaper-ai-chat' ),
+		),
+	);
+}
+
+/**
  * Enqueue frontend assets only when shortcode is rendered.
  *
  * @return void
  */
 function epac_enqueue_frontend_assets() {
-	$settings = epac_get_settings();
+	$frontend_config = epac_get_frontend_config();
 
 	wp_enqueue_style( 'epac-frontend' );
 	wp_enqueue_script( 'epac-frontend' );
 
+	/*
+	 * Use both wp_localize_script and wp_add_inline_script.
+	 * Some cache/optimization plugins mishandle one of them; the shortcode
+	 * root also includes data-* attributes as a final fallback.
+	 */
 	wp_localize_script(
 		'epac-frontend',
 		'EPAC_DATA',
-		array(
-			'endpoint'            => esc_url_raw( rest_url( EPAC_REST_NAMESPACE . '/generate' ) ),
-			'nonce'               => wp_create_nonce( 'epac_chat_nonce' ),
-			'defaultProvider'     => sanitize_key( $settings['default_provider'] ),
-			'showProviderSwitch'  => '1' === (string) $settings['show_provider_switch'],
-			'enabledProviders'    => epac_get_enabled_providers_for_frontend(),
-			'i18n'                => array(
-				'copied'      => __( 'Prompt copied.', 'edupaper-ai-chat' ),
-				'working'     => __( 'Generating paper...', 'edupaper-ai-chat' ),
-				'error'       => __( 'Something went wrong. Please try again.', 'edupaper-ai-chat' ),
-				'emptyPrompt' => __( 'Please select options or add instructions first.', 'edupaper-ai-chat' ),
-				'assistantHi' => __( 'Select the paper options above. Your prompt will appear below, then I can generate the paper here.', 'edupaper-ai-chat' ),
-			),
-		)
+		$frontend_config
+	);
+
+	wp_add_inline_script(
+		'epac-frontend',
+		'window.EPAC_DATA = window.EPAC_DATA || ' . wp_json_encode( $frontend_config ) . ';',
+		'before'
 	);
 }
 
@@ -614,13 +645,21 @@ function epac_render_shortcode( $atts ) {
 
 	epac_enqueue_frontend_assets();
 
-	$dropdowns  = epac_get_dropdowns();
-	$full_width = 'yes' === strtolower( (string) $atts['full_width'] );
-	$classes    = 'epac-app' . ( $full_width ? ' epac-app--full-width' : '' );
+	$dropdowns       = epac_get_dropdowns();
+	$frontend_config = epac_get_frontend_config();
+	$full_width      = 'yes' === strtolower( (string) $atts['full_width'] );
+	$classes         = 'epac-app' . ( $full_width ? ' epac-app--full-width' : '' );
+	$enabled_json    = wp_json_encode( $frontend_config['enabledProviders'] );
 
 	ob_start();
 	?>
-	<div class="<?php echo esc_attr( $classes ); ?>" data-epac-root>
+	<div class="<?php echo esc_attr( $classes ); ?>"
+		data-epac-root
+		data-epac-endpoint="<?php echo esc_url( $frontend_config['endpoint'] ); ?>"
+		data-epac-nonce="<?php echo esc_attr( $frontend_config['nonce'] ); ?>"
+		data-epac-default-provider="<?php echo esc_attr( $frontend_config['defaultProvider'] ); ?>"
+		data-epac-show-provider-switch="<?php echo esc_attr( $frontend_config['showProviderSwitch'] ? '1' : '0' ); ?>"
+		data-epac-enabled-providers="<?php echo esc_attr( $enabled_json ); ?>">
 		<div class="epac-shell">
 			<header class="epac-header">
 				<p class="epac-kicker"><?php echo esc_html__( 'EduPaper AI Chat', 'edupaper-ai-chat' ); ?></p>
@@ -894,41 +933,100 @@ function epac_remote_json_post( $url, $headers, $body, $fallback_error ) {
 		);
 	}
 
+	$json_body = wp_json_encode( $body );
+	if ( false === $json_body ) {
+		return new WP_Error(
+			'epac_json_encode_failed',
+			__( 'Could not prepare the API request body.', 'edupaper-ai-chat' ),
+			array( 'status' => 500 )
+		);
+	}
+
+	$headers = wp_parse_args(
+		$headers,
+		array(
+			'Content-Type' => 'application/json; charset=utf-8',
+			'Accept'       => 'application/json',
+			'User-Agent'   => 'EduPaper-AI-Chat/' . EPAC_VERSION . '; ' . home_url(),
+		)
+	);
+
 	$response = wp_remote_post(
 		$url,
 		array(
-			'timeout' => 60,
-			'headers' => $headers,
-			'body'    => wp_json_encode( $body ),
+			'timeout'            => 60,
+			'redirection'        => 3,
+			'reject_unsafe_urls' => true,
+			'headers'           => $headers,
+			'body'              => $json_body,
+			'data_format'       => 'body',
 		)
 	);
 
 	if ( is_wp_error( $response ) ) {
 		return new WP_Error(
 			'epac_remote_error',
-			$response->get_error_message(),
+			sprintf(
+				/* translators: %s is the WordPress HTTP API error message. */
+				__( 'Remote API connection failed: %s', 'edupaper-ai-chat' ),
+				$response->get_error_message()
+			),
 			array( 'status' => 502 )
 		);
 	}
 
 	$status_code = (int) wp_remote_retrieve_response_code( $response );
-	$raw_body    = wp_remote_retrieve_body( $response );
+	$raw_body    = (string) wp_remote_retrieve_body( $response );
 	$data        = json_decode( $raw_body, true );
-	$data        = is_array( $data ) ? $data : array();
+	$is_json     = is_array( $data );
 
 	if ( $status_code < 200 || $status_code >= 300 ) {
 		$message = '';
-		if ( isset( $data['error']['message'] ) && is_string( $data['error']['message'] ) ) {
-			$message = $data['error']['message'];
-		} elseif ( isset( $data['error']['status'] ) && is_string( $data['error']['status'] ) ) {
-			$message = $data['error']['status'];
+
+		if ( $is_json ) {
+			if ( isset( $data['error']['message'] ) && is_string( $data['error']['message'] ) ) {
+				$message = $data['error']['message'];
+			} elseif ( isset( $data['message'] ) && is_string( $data['message'] ) ) {
+				$message = $data['message'];
+			} elseif ( isset( $data['error_description'] ) && is_string( $data['error_description'] ) ) {
+				$message = $data['error_description'];
+			} elseif ( isset( $data['error']['status'] ) && is_string( $data['error']['status'] ) ) {
+				$message = $data['error']['status'];
+			} elseif ( isset( $data['error'] ) && is_string( $data['error'] ) ) {
+				$message = $data['error'];
+			}
 		}
-		$message = '' !== $message ? sanitize_text_field( $message ) : $fallback_error;
+
+		if ( '' === $message ) {
+			$snippet = trim( wp_strip_all_tags( $raw_body ) );
+			$snippet = '' !== $snippet ? ' ' . substr( $snippet, 0, 240 ) : '';
+			$message = sprintf(
+				/* translators: 1: HTTP status code, 2: short API body snippet. */
+				__( 'API request failed with HTTP %1$d.%2$s', 'edupaper-ai-chat' ),
+				$status_code,
+				$snippet
+			);
+		}
 
 		return new WP_Error(
 			'epac_api_error',
-			$message,
-			array( 'status' => $status_code )
+			sanitize_text_field( $message ),
+			array( 'status' => $status_code ? $status_code : 502 )
+		);
+	}
+
+	if ( ! $is_json ) {
+		$snippet = trim( wp_strip_all_tags( $raw_body ) );
+		$snippet = '' !== $snippet ? substr( $snippet, 0, 240 ) : __( 'Empty body.', 'edupaper-ai-chat' );
+
+		return new WP_Error(
+			'epac_non_json_response',
+			sprintf(
+				/* translators: %s is a short response snippet. */
+				__( 'The API returned a non-JSON response: %s', 'edupaper-ai-chat' ),
+				$snippet
+			),
+			array( 'status' => 502 )
 		);
 	}
 
@@ -1126,8 +1224,20 @@ function epac_call_custom( $prompt, $settings ) {
  * @return WP_REST_Response|WP_Error
  */
 function epac_rest_generate( WP_REST_Request $request ) {
-	$nonce = $request->get_header( 'x-epac-nonce' );
-	if ( ! $nonce || ! wp_verify_nonce( $nonce, 'epac_chat_nonce' ) ) {
+	$nonce = $request->get_header( 'x-wp-nonce' );
+	if ( empty( $nonce ) ) {
+		$nonce = $request->get_header( 'x-epac-nonce' );
+	}
+
+	$nonce_is_valid = false;
+	if ( ! empty( $nonce ) ) {
+		$nonce_is_valid = (bool) wp_verify_nonce( $nonce, 'wp_rest' );
+		if ( ! $nonce_is_valid ) {
+			$nonce_is_valid = (bool) wp_verify_nonce( $nonce, 'epac_chat_nonce' );
+		}
+	}
+
+	if ( ! $nonce_is_valid ) {
 		return new WP_Error(
 			'epac_bad_nonce',
 			__( 'Security check failed. Please refresh the page and try again.', 'edupaper-ai-chat' ),
